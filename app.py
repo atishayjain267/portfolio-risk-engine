@@ -1,8 +1,18 @@
+import os
 import streamlit as st
 import plotly.express as px
-from risk_engine import analyze_portfolio, load_returns
+from sqlalchemy import inspect
+from database import engine
+from etl_pipeline import run_pipeline
+from risk_engine import analyze_portfolio
 
 st.set_page_config(page_title="Portfolio Risk Engine", layout="wide")
+
+# Ensure database and table exist before running analytics
+inspector = inspect(engine)
+if not os.path.exists("portfolio.db") or not inspector.has_table("asset_prices"):
+    with st.spinner("Initializing database and fetching market data..."):
+        run_pipeline()
 
 st.title("Financial Assets & Portfolio Risk Engine")
 st.caption("Automated Time-Series Data Engineering & Portfolio Optimization")
