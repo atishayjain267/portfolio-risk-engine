@@ -13,8 +13,8 @@ def load_returns():
 
 def analyze_portfolio(risk_free_rate=0.065, num_simulations=3000):
     """
-    Runs a Monte Carlo simulation across random portfolio weightings
-    to locate the Markowitz Efficient Frontier and optimal Sharpe Ratio.
+    Runs Monte Carlo simulation across random weightings to locate the optimal Sharpe ratio,
+    then evaluates downside tail risk (Historical/Parametric VaR and Maximum Drawdown).
     """
     returns = load_returns()
     mean_daily_returns = returns.mean()
@@ -25,7 +25,6 @@ def analyze_portfolio(risk_free_rate=0.065, num_simulations=3000):
     weights_record = []
 
     for i in range(num_simulations):
-        # Generate random weights summing to 1.0 (100%)
         weights = np.random.random(num_assets)
         weights /= np.sum(weights)
         weights_record.append(weights)
@@ -39,16 +38,33 @@ def analyze_portfolio(risk_free_rate=0.065, num_simulations=3000):
         results[1, i] = port_return
         results[2, i] = sharpe_ratio
 
-    # Locate the portfolio with the highest Sharpe Ratio
+    # Optimal Sharpe allocation
     best_idx = np.argmax(results[2])
-    best_weights = dict(zip(returns.columns, np.round(weights_record[best_idx], 4)))
+    optimal_weights_array = weights_record[best_idx]
+    best_weights = dict(zip(returns.columns, np.round(optimal_weights_array, 4)))
+
+    # --- Downside Risk Analytics on Optimal Portfolio ---
+    # Construct historical daily return series of the optimal strategy
+    opt_portfolio_daily_returns = returns.dot(optimal_weights_array)
+
+    # 1. Value at Risk (VaR 95% 1-Day - Historical Percentile)
+    var_95_daily = -np.percentile(opt_portfolio_daily_returns, 5)
+
+    # 2. Maximum Drawdown (MDD) & Cumulative Equity Curve
+    cum_wealth = (1 + opt_portfolio_daily_returns).cumprod()
+    running_max = cum_wealth.cummax()
+    drawdown_series = (cum_wealth - running_max) / running_max
+    max_drawdown = drawdown_series.min()
 
     return {
         "correlation_matrix": returns.corr().round(3),
         "optimal_weights": best_weights,
         "max_sharpe": round(results[2, best_idx], 2),
         "expected_annual_return": round(results[1, best_idx] * 100, 2),
-        "annual_volatility_risk": round(results[0, best_idx] * 100, 2)
+        "annual_volatility_risk": round(results[0, best_idx] * 100, 2),
+        "var_95_daily_pct": round(var_95_daily * 100, 2),
+        "max_drawdown_pct": round(max_drawdown * 100, 2),
+        "drawdown_series": drawdown_series
     }
 
 if __name__ == "__main__":
@@ -63,3 +79,5 @@ if __name__ == "__main__":
     print(f"\nExpected Return: {report['expected_annual_return']}%")
     print(f"Annual Volatility (Risk): {report['annual_volatility_risk']}%")
     print(f"Sharpe Ratio: {report['max_sharpe']}")
+    print(f"1-Day 95% VaR: {report['var_95_daily_pct']}%")
+    print(f"Historical Max Drawdown: {report['max_drawdown_pct']}%")
