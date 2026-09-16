@@ -1,52 +1,36 @@
 import yfinance as yf
-import numpy as np
 import pandas as pd
-from database import engine, init_db
+from database import engine
 
-# Assets to track: Benchmark index, a Gold ETF, and two large-cap equities
-WATCHLIST = ["^NSEI", "GOLDBEES.NS", "TCS.NS", "HDFCBANK.NS"]
+DEFAULT_TICKERS = ["SPY", "QQQ", "GLD", "TLT", "AAPL"]
 
-def fetch_and_process(ticker: str) -> pd.DataFrame:
-    """Extracts 6 months of data and computes financial features."""
-    print(f"Extracting & processing: {ticker}")
-    df = yf.download(ticker, period="6mo", progress=False)
-    
-    if df.empty:
-        return pd.DataFrame()
-
-    # Flatten MultiIndex columns if present
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.copy()
-    df["ticker"] = ticker
-    df["trade_date"] = df.index.date
-    df["close_price"] = df["Close"]
-
-    # Transformation: Log returns and 30-day annualized volatility
-    df["daily_return"] = np.log(df["close_price"] / df["close_price"].shift(1))
-    df["rolling_vol"] = df["daily_return"].rolling(window=30).std() * np.sqrt(252)
-
-    # Select only the columns matching our database table
-    clean_df = df[["ticker", "trade_date", "close_price", "daily_return", "rolling_vol"]].dropna(subset=["daily_return"])
-    return clean_df
-
-def run_pipeline():
-    init_db()  # Ensure tables exist
-    
-    all_data = []
-    for ticker in WATCHLIST:
-        df_processed = fetch_and_process(ticker)
-        if not df_processed.empty:
-            all_data.append(df_processed)
-
-    if all_data:
-        final_df = pd.concat(all_data, ignore_index=True)
-        # Load: write straight to the SQLite table
-        final_df.to_sql("asset_prices", con=engine, if_exists="replace", index=False)
-        print(f"\nETL complete: Successfully loaded {len(final_df)} records into 'asset_prices' table.")
+def fetch_data(tickers: list = None, period: str = "2y") -> pd.DataFrame:
+    """Extracts adjusted close prices from Yahoo Finance."""
+    if tickers is None:
+        tickers = DEFAULT_TICKERS
+    data = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+    if "Close" in data.columns:
+        prices = data["Close"]
     else:
-        print("No data extracted.")
+        prices = data
+    return prices.dropna()
+
+def process_data(prices: pd.DataFrame) -> pd.DataFrame:
+    """Transforms raw prices into daily log/percentage returns."""
+    returns = prices.pct_change().dropna()
+    return returns
+
+def load_to_db(returns_df: pd.DataFrame):
+    """Loads transformed returns into SQLite database."""
+    returns_df.to_sql("asset_returns", con=engine, if_exists="replace", index=True)
+
+def run_pipeline(tickers: list = None) -> int:
+    """Executes the complete ETL sequence."""
+    prices = fetch_data(tickers)
+    returns = process_data(prices)
+    load_to_db(returns)
+    return len(returns)
 
 if __name__ == "__main__":
-    run_pipeline()
+    count = run_pipeline()
+    print(f"ETL Pipeline successfully processed {count} records.")
