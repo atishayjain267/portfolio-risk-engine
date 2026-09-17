@@ -1,81 +1,72 @@
 ﻿import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from database import engine
 
-def load_returns(engine) -> pd.DataFrame:
-    """Loads transformed asset returns table from the database."""
+def load_returns(db_engine=engine) -> pd.DataFrame:
+    """Queries SQLite asset_returns table and returns a clean daily returns DataFrame."""
     query = "SELECT * FROM asset_returns"
-    df = pd.read_sql(query, con=engine)
+    with db_engine.connect() as conn:
+        df = pd.read_sql(query, con=conn)
     
-    # Handle Date index if stored as a column
-    date_cols = [c for c in df.columns if "date" in c.lower() or "index" in c.lower()]
-    if date_cols:
-        df = df.set_index(date_cols[0])
+    if "Date" in df.columns:
+        df = df.set_index("Date")
     
-    # Keep only numeric return columns
-    numeric_df = df.select_dtypes(include=[np.number])
-    return numeric_df.dropna()
+    return df.dropna()
 
-def portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate=0.065):
-    """Calculates annualized expected return, volatility, and Sharpe ratio."""
-    port_return = np.sum(mean_returns * weights) * 252
-    port_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix * 252, weights)))
-    sharpe_ratio = (port_return - risk_free_rate) / port_volatility if port_volatility != 0 else 0
-    return port_return, port_volatility, sharpe_ratio
-
-def neg_sharpe_ratio(weights, mean_returns, cov_matrix, risk_free_rate=0.065):
-    """Objective function to minimize (negative Sharpe ratio)."""
-    return -portfolio_performance(weights, mean_returns, cov_matrix, risk_free_rate)[2]
-
-def analyze_portfolio(returns_df: pd.DataFrame, risk_free_rate: float = 0.065) -> dict:
+def analyze_portfolio(
+    returns_df: pd.DataFrame, 
+    risk_free_rate: float = 0.065, 
+    num_simulations: int = 3000,
+    investor_profile: str = "Balanced (Growth + Hedge)"
+) -> dict:
     """
-    Executes Markowitz Mean-Variance Optimization and computes risk statistics.
+    Monte Carlo simulation with profile-specific allocation constraints:
+    - Conservative: 30-50% Gold, lower equities (5-20%)
+    - Balanced: 10-35% across all assets
+    - Aggressive: 5-15% Gold, higher equities (15-45%)
     """
-    mean_returns = returns_df.mean()
+    mean_daily_returns = returns_df.mean()
     cov_matrix = returns_df.cov()
     num_assets = len(returns_df.columns)
-    
-    # Boundary conditions: weights sum to 1, no short selling (0 <= w <= 1)
-    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
-    bounds = tuple((0.0, 1.0) for _ in range(num_assets))
-    initial_weights = num_assets * [1.0 / num_assets]
-    
-    # Numerical optimization
-    opt_results = minimize(
-        neg_sharpe_ratio,
-        initial_weights,
-        args=(mean_returns, cov_matrix, risk_free_rate),
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints
-    )
-    
-    optimal_weights = opt_results.x if opt_results.success else initial_weights
-    exp_return, volatility, sharpe = portfolio_performance(
-        optimal_weights, mean_returns, cov_matrix, risk_free_rate
-    )
-    
-    # Calculate historical 1-day 95% Value at Risk (VaR)
-    portfolio_daily_returns = (returns_df * optimal_weights).sum(axis=1)
-    var_95 = np.percentile(portfolio_daily_returns, 5)
-    
-    # Calculate Maximum Drawdown
-    cumulative = (1 + portfolio_daily_returns).cumprod()
-    peak = cumulative.cummax()
-    drawdown = (cumulative - peak) / peak
-    max_drawdown = drawdown.min()
-    
-    weight_dict = {
-        col: round(float(w), 4)
-        for col, w in zip(returns_df.columns, optimal_weights)
-    }
-    
+    assets = list(returns_df.columns)
+
+    # Set asset-level bounds depending on investor profile
+    bounds = {}
+    for asset in assets:
+        if "Conservative" in investor_profile:
+            bounds[asset] = (0.30, 0.50) if "GOLDBEES" in asset else (0.05, 0.20)
+        elif "Aggressive" in investor_profile:
+            bounds[asset] = (0.05, 0.15) if "GOLDBEES" in asset else (0.15, 0.45)
+        else:  # Balanced
+            bounds[asset] = (0.10, 0.35)
+
+    lows = np.array([bounds[a][0] for a in assets])
+    highs = np.array([bounds[a][1] for a in assets])
+
+    results = np.zeros((3, num_simulations))
+    weights_record = []
+    np.random.seed(42)
+
+    for i in range(num_simulations):
+        raw = np.random.uniform(lows, highs)
+        w = raw / np.sum(raw)
+        weights_record.append(w)
+
+        port_return = np.sum(mean_daily_returns * w) * 252
+        port_volatility = np.sqrt(np.dot(w.T, np.dot(cov_matrix * 252, w)))
+        sharpe_ratio = (port_return - risk_free_rate) / (port_volatility + 1e-8)
+
+        results[0, i] = port_volatility
+        results[1, i] = port_return
+        results[2, i] = sharpe_ratio
+
+    best_idx = int(np.argmax(results[2]))
+    best_weights = weights_record[best_idx]
+    optimal_weights = dict(zip(returns_df.columns, np.round(best_weights, 4)))
+
     return {
-        "expected_annual_return": round(float(exp_return) * 100, 2),
-        "annual_volatility_risk": round(float(volatility) * 100, 2),
-        "max_sharpe": round(float(sharpe), 2),
-        "var_95_daily_pct": round(float(var_95) * 100, 2),
-        "max_drawdown_pct": round(float(max_drawdown) * 100, 2),
-        "optimal_weights": weight_dict,
-        "weights": optimal_weights
+        "optimal_weights": optimal_weights,
+        "max_sharpe": round(float(results[2, best_idx]), 2),
+        "expected_annual_return": round(float(results[1, best_idx]) * 100, 2),
+        "annual_volatility_risk": round(float(results[0, best_idx]) * 100, 2)
     }
