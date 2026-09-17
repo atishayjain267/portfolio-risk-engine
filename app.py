@@ -1,130 +1,107 @@
+import os
 import streamlit as st
-import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-
+import pandas as pd
+from sqlalchemy import inspect
 from database import engine
 from etl_pipeline import run_pipeline
-from risk_engine import load_returns, analyze_portfolio
-from llm_analyst import generate_risk_briefing
+from risk_engine import analyze_portfolio, load_returns
 
-# ---------------- PAGE CONFIGURATION ----------------
+# 1. Page Configuration
 st.set_page_config(
-    page_title="Quantitative Portfolio Risk & Allocation Engine",
+    page_title="Portfolio Risk Engine", 
     page_icon="📈",
-    layout="wide",
+    layout="wide"
 )
 
-st.title("📈 Quantitative Portfolio Risk & Allocation Engine")
-st.caption("Production Data Pipeline, Mean-Variance Optimization, and GenAI Risk Analysis")
+# 2. Auto-initialize Database on boot
+inspector = inspect(engine)
+if not os.path.exists("portfolio.db") or not inspector.has_table("asset_prices"):
+    with st.spinner("Setting up database and downloading market data..."):
+        run_pipeline()
 
-# ---------------- SIDEBAR CONTROLS ----------------
-st.sidebar.header("⚙️ Engine Configuration")
+# 3. Simple Header
+st.title("📈 Smart Portfolio Optimizer")
+st.write(
+    "This tool analyzes historical market prices to find the **safest and most rewarding investment recipe** "
+    "across equities, market indices, and gold."
+)
 
-# Pipeline Trigger
-if st.sidebar.button("🔄 Run ETL Data Pipeline", use_container_width=True):
-    with st.spinner("Ingesting market feeds and writing to SQL database..."):
-        try:
-            records = run_pipeline()
-            st.sidebar.success(f"Pipeline executed: {records} rows processed.")
-        except Exception as e:
-            st.sidebar.error(f"Pipeline failure: {e}")
+# 4. Sidebar Controls (Simple, Friendly Labels)
+st.sidebar.header("⚙️ Settings")
+rfr_input = st.sidebar.slider(
+    "Risk-Free Interest Rate (FD / Govt Bond %)", 
+    min_value=3.0, 
+    max_value=8.5, 
+    value=6.5, 
+    step=0.5,
+    help="The guaranteed interest rate you would get without taking market risk."
+)
+risk_free_rate = rfr_input / 100
 
-# Gemini API Key Setup
+sim_count = st.sidebar.selectbox(
+    "Simulation Speed", 
+    options=[1000, 2000, 3000], 
+    index=1,
+    help="How many random weight combinations the engine will test."
+)
+
+if st.sidebar.button("🔄 Recalculate Portfolio"):
+    st.rerun()
+
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 GenAI Risk Analyst")
-api_key = st.sidebar.text_input(
-    "Enter Gemini API Key",
-    type="password",
-    help="Enter your Google AI Studio API key to activate executive briefings."
-)
+st.sidebar.caption("Basket: NIFTY 50, Gold BeES, TCS, and HDFC Bank.")
 
-# ---------------- MAIN DATA & RISK ANALYSIS ----------------
-try:
-    returns_df = load_returns(engine)
-except Exception as e:
-    st.error(f"Could not load asset returns from the database. Run the ETL pipeline first: {e}")
-    st.stop()
+# 5. Run Backend Engine
+returns_df = load_returns()
+report = analyze_portfolio(returns_df, risk_free_rate=risk_free_rate)
 
-if returns_df.empty:
-    st.warning("Database contains no return data. Please click 'Run ETL Data Pipeline' in the sidebar.")
-    st.stop()
+# 6. Key Metrics (Easy to understand cards)
+col1, col2, col3 = st.columns(3)
+col1.metric("Expected Annual Return", f"{report['expected_annual_return']}%", help="Estimated average gain per year.")
+col2.metric("Annual Risk (Volatility)", f"{report['annual_volatility_risk']}%", help="How much the portfolio swings up or down.")
+col3.metric("Sharpe Score", f"{report['max_sharpe']}", help="Higher is better: measures reward per unit of risk.")
 
-# Run quantitative risk analysis
-report = analyze_portfolio(returns_df)
+st.markdown("---")
 
-# ---------------- ROW 1: CORE RISK METRICS ----------------
-st.subheader("📊 Key Risk & Return Metrics")
-m1, m2, m3, m4, m5 = st.columns(5)
+# 7. Main Visuals: Clean 2-Column Split
+left_col, right_col = st.columns(2)
 
-exp_ret = report.get("expected_annual_return", report.get("expected_return", 0) * 100)
-vol = report.get("annual_volatility_risk", report.get("volatility", 0) * 100)
-sharpe = report.get("max_sharpe", report.get("sharpe_ratio", 0))
-var95 = report.get("var_95_daily_pct", report.get("var_95", 0) * 100)
-mdd = report.get("max_drawdown_pct", report.get("max_drawdown", 0) * 100)
-
-m1.metric("Expected Return", f"{exp_ret:.2f}%")
-m2.metric("Annual Volatility", f"{vol:.2f}%")
-m3.metric("Max Sharpe Ratio", f"{sharpe:.2f}")
-m4.metric("1-Day 95% VaR", f"{var95:.2f}%")
-m5.metric("Max Drawdown", f"{mdd:.2f}%")
-
-st.divider()
-
-# ---------------- ROW 2: ALLOCATION & CHARTS ----------------
-c1, c2 = st.columns(2)
-
-with c1:
-    st.subheader("🎯 Optimal Asset Allocation")
-    weights = report.get("optimal_weights", {})
-    if weights:
-        weights_df = pd.DataFrame(list(weights.items()), columns=["Asset", "Weight"])
-        fig_pie = px.pie(
-            weights_df,
-            names="Asset",
-            values="Weight",
-            hole=0.4,
-            color_discrete_sequence=px.colors.qualitative.Prism,
-        )
-        fig_pie.update_layout(margin=dict(t=20, b=20, l=20, r=20))
-        st.plotly_chart(fig_pie, use_container_width=True)
-    else:
-        st.info("No optimal weights computed.")
-
-with c2:
-    st.subheader("📉 Historical Asset Cumulative Returns")
-    cumulative_returns = (1 + returns_df).cumprod()
-    fig_line = px.line(
-        cumulative_returns,
-        labels={"value": "Growth ($1 Base)", "Date": "Timeline"},
-        color_discrete_sequence=px.colors.qualitative.Safe,
+with left_col:
+    st.subheader("🎯 Recommended Investment Split")
+    st.caption("How much of your money should go into each asset for the best risk-reward balance.")
+    
+    weights_df = pd.DataFrame({
+        "Asset": list(report["optimal_weights"].keys()),
+        "Percentage": [round(v * 100, 1) for v in report["optimal_weights"].values()]
+    })
+    
+    fig_donut = px.pie(
+        weights_df, 
+        names="Asset", 
+        values="Percentage", 
+        hole=0.5,
+        color_discrete_sequence=px.colors.qualitative.Pastel
     )
-    fig_line.update_layout(
-        legend_title_text="Ticker",
-        margin=dict(t=20, b=20, l=20, r=20)
+    fig_donut.update_traces(textposition="inside", textinfo="percent+label")
+    fig_donut.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig_donut, use_container_width=True)
+
+with right_col:
+    st.subheader("🔗 Asset Relationships (Correlation)")
+    st.caption("Values close to 0 mean the assets protect each other when the market drops.")
+    
+    corr_matrix = report["correlation_matrix"]
+    fig_corr = px.imshow(
+        corr_matrix, 
+        text_auto=".2f", 
+        aspect="auto", 
+        color_continuous_scale="Blues"
     )
-    st.plotly_chart(fig_line, use_container_width=True)
+    fig_corr.update_layout(margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig_corr, use_container_width=True)
 
-st.divider()
-
-# ---------------- ROW 3: GENAI EXECUTIVE BRIEFING ----------------
-st.subheader("🤖 Executive AI Risk Committee Briefing")
-st.caption("Synthesized quantitative intelligence generated by Gemini 3.6 Flash reasoning.")
-
-if st.button("Generate AI Risk Committee Briefing", type="primary"):
-    if not api_key:
-        st.warning("⚠️ Please provide a Gemini API Key in the sidebar first.")
-    else:
-        with st.spinner("Analyzing risk metrics and formulating executive notes..."):
-            try:
-                briefing_text = generate_risk_briefing(report, api_key)
-                st.success("Executive Briefing Successfully Generated!")
-                st.markdown(briefing_text)
-            except Exception as e:
-                st.error(f"Error generating briefing: {e}")
-
-st.divider()
-
-# ---------------- ROW 4: DATA ENGINEERING EXPLORER ----------------
-with st.expander("🔍 View Raw Database Historical Log & Model Schema"):
-    st.dataframe(returns_df.tail(25), use_container_width=True)
+# 8. Collapsible Data Preview (Keeps page clean unless opened)
+with st.expander("🔍 View Raw Database Records"):
+    raw_preview = pd.read_sql("SELECT ticker, trade_date, close_price, daily_return FROM asset_prices ORDER BY trade_date DESC LIMIT 20", con=engine)
+    st.dataframe(raw_preview, use_container_width=True)
