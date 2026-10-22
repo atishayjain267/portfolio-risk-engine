@@ -35,3 +35,25 @@ An end-to-end financial data engineering and quantitative analytics platform. Th
 [ GenAI Decision Layer (`llm_analyst.py`) ]
   • Automated risk committee memorandums via Google Gemini 3.6 Flash
 ```
+
+## ⚙️ Setup & Run
+
+1. **Install dependencies**
+```bash
+   pip install -r requirements.txt
+```
+
+2. **Set your Gemini API key** as an environment variable
+   - Windows (PowerShell): `$env:GOOGLE_API_KEY="your-key-here"`
+   - macOS/Linux: `export GOOGLE_API_KEY="your-key-here"`
+
+3. **Load market data** into the local SQLite database
+```bash
+   python etl_pipeline.py
+```
+
+4. **Launch the dashboard**
+```bash
+   streamlit run app.py
+```
+
